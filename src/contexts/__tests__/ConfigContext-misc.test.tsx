@@ -1,0 +1,683 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+
+const mockGetDoc = vi.hoisted(() =>
+  vi.fn((): Promise<{ exists: () => boolean; data?: () => Record<string, unknown> }> =>
+    Promise.resolve({ exists: () => false }),
+  ),
+);
+const mockLocation = vi.hoisted(() => ({ pathname: "/test", search: "", hash: "" }));
+const mockDecodeInviteConfig = vi.hoisted(() => {
+  const stable = {};
+  return vi.fn(() => stable);
+});
+const mockSafeGetItem = vi.hoisted(() => vi.fn((_key?: unknown) => null as string | null));
+const mockSafeSetItem = vi.hoisted(() => vi.fn());
+const mockLoadAudio = vi.hoisted(() => vi.fn(() => Promise.resolve({ url: "" })));
+const mockLoadDecryptedField = vi.hoisted(() => vi.fn(() => Promise.resolve("")));
+const mockSetSaveError = vi.hoisted(() => vi.fn());
+const mockSetSaveMessage = vi.hoisted(() => vi.fn());
+const mockSetDoc = vi.hoisted(() => vi.fn(() => new Promise((r) => setTimeout(r, 50))));
+const mockAddDoc = vi.hoisted(() => vi.fn());
+
+vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock("react-router", () => ({ useLocation: () => mockLocation, useNavigate: () => vi.fn() }));
+vi.mock("firebase/firestore", () => ({
+  getDoc: mockGetDoc,
+  setDoc: mockSetDoc,
+  addDoc: mockAddDoc,
+  updateDoc: vi.fn(),
+  doc: vi.fn(() => ({ id: "test" })),
+  collection: vi.fn(() => ({ id: "test" })),
+  getDocs: vi.fn(() => Promise.resolve({ docs: [], empty: true })),
+  writeBatch: vi.fn(() => ({ delete: vi.fn(), commit: vi.fn() })),
+  increment: vi.fn(() => 1),
+  query: vi.fn(),
+  where: vi.fn(),
+  serverTimestamp: vi.fn(() => new Date()),
+}));
+vi.mock("../useAppUI", () => ({
+  useAppUI: () => ({ setSaveMessage: mockSetSaveMessage, setSaveError: mockSetSaveError }),
+
+  useUIMessages: () => ({ setSaveMessage: mockSetSaveMessage, setSaveError: mockSetSaveError, saveMessage: "", saveError: "", adminMessage: "", adminMessageType: "success" }),
+}));
+vi.mock("../../hooks/useCalendar", () => ({
+  useCalendar: () => ({ formattedDate: "", formattedTime: "", calendarLink: null }),
+}));
+vi.mock("../../hooks/useFieldHandlers", () => ({
+  useFieldHandlers: () => ({
+    handleDayChange: vi.fn(),
+    handleTimeChange: vi.fn(),
+    handleTimeBlur: vi.fn(),
+    handleYearChange: vi.fn(),
+    handleCoordinateChange: vi.fn(),
+  }),
+}));
+vi.mock("../../hooks/useMapPreview", () => ({
+  useMapPreview: () => ({ previewBackgrounds: [], isPreviewLoading: false }),
+}));
+vi.mock("../../hooks/useAutoSave", () => ({ useAutoSave: () => ({ autoSaveTimerRef: { current: null } }) }));
+vi.mock("../../lib/constants", () => ({
+  defaultConfig: {},
+  STORY_SECTION_ORDER: ["hero", "details", "info", "story", "gifts", "accommodation", "gallery", "rsvp"],
+  THEME_VALUES: new Set(["golden", "silver", "rose"]),
+  MAX_YEARS_AHEAD: 10,
+  INVITE_CACHE_TTL_MS: 60000,
+  TOKEN_ROUTE_REGEX: /^[a-zA-Z0-9]+$/,
+  SPECIAL_SECTIONS: [],
+  MAX_USERNAME_LENGTH: 50,
+  MAX_INVITE_MESSAGE_LENGTH: 500,
+  MAX_LONG_TEXT_LENGTH: 2000,
+  MAX_SCHEDULE_EVENTS: 10,
+  MAX_SCHEDULE_EVENT_TEXT: 60,
+  PRIVACY_POLICY_VERSION: 1,
+}));
+vi.mock("../../lib/normalize-config", () => ({ normalizeConfig: (v: unknown) => v }));
+vi.mock("../../lib/date-utils", () => ({ validateWeddingDate: vi.fn(() => null) }));
+vi.mock("../../lib/invite-config-codec", () => ({ decodeInviteConfig: mockDecodeInviteConfig }));
+vi.mock("../../lib/firebase", () => ({
+  db: {},
+  invitationDocRef: vi.fn(() => ({ id: "test" })),
+  rsvpByInviteRef: vi.fn(() => ({})),
+}));
+vi.mock("../../lib/image-store", () => ({
+  loadDecryptedField: mockLoadDecryptedField,
+  deleteGallery: vi.fn(() => Promise.resolve()),
+  resolveAllConfigImages: vi.fn(() => Promise.resolve({})),
+  deleteAllConfigImages: vi.fn(() => Promise.resolve()),
+  isConfigImageRef: vi.fn(() => false),
+  saveConfigImage: vi.fn((_t, id, _v) => Promise.resolve("__cfgimg:" + id)),
+}));
+vi.mock("../../lib/music-store", () => ({ loadAudio: mockLoadAudio }));
+vi.mock("../../lib/sessionVars", () => ({ clearSession: vi.fn() }));
+vi.mock("../../lib/storage", () => ({
+  safeSetItem: mockSafeSetItem,
+  safeGetItem: mockSafeGetItem,
+  safeRemoveItem: vi.fn(),
+  // Respeta el valor de consentimiento que simulan los tests vía mockSafeGetItem.
+  hasAnalyticsConsent: vi.fn(() => mockSafeGetItem("wedin_cookie_consent") === "accepted"),
+  hasRejectedConsent: vi.fn(() => mockSafeGetItem("wedin_cookie_consent") === "rejected"),
+}));
+vi.mock("../../lib/crypto-utils", () => ({
+  encrypt: vi.fn((s: string) => Promise.resolve(s)),
+  decrypt: vi.fn((s: string) => Promise.resolve(s)),
+}));
+vi.mock("../../lib/error-utils", () => ({ getFirestoreErrorMessage: vi.fn(() => "error") }));
+
+import { ConfigProvider } from "../ConfigContext";
+import { useConfig, useFormData } from "../useConfig";
+
+function SaveSetupConsumer() {
+  const ctx = useConfig();
+  const { updateFormField } = useFormData();
+  return (
+    <div>
+      {/* Indicador de isSaving: permite esperar al finally del primer guardado
+          en vuelo antes de desmontar (si el test termina antes, setIsSaving(false)
+          resuelve fuera del entorno jsdom y provoca una unhandled rejection). */}
+      <span data-testid="ss_isSaving">{String(ctx.isSaving)}</span>
+      <button data-testid="ss_save" onClick={(e) => ctx.handleSaveSetup(e)}>
+        Save
+      </button>
+      <button data-testid="ss_first" onClick={() => updateFormField("firstName", "John")}>
+        F
+      </button>
+      <button data-testid="ss_second" onClick={() => updateFormField("secondName", "Jane")}>
+        S
+      </button>
+      <button data-testid="ss_theme" onClick={() => updateFormField("theme", "golden")}>
+        T
+      </button>
+      <button
+        data-testid="ss_order"
+        onClick={() => updateFormField("sectionOrder", "hero,details,info,story,gifts,accommodation,gallery,rsvp")}
+      >
+        O
+      </button>
+      <button data-testid="ss_gp1" onClick={() => updateFormField("godparent1", "GP1")}>
+        G1
+      </button>
+      <button data-testid="ss_gp2" onClick={() => updateFormField("godparent2", "GP2")}>
+        G2
+      </button>
+      <button data-testid="ss_stored" onClick={() => ctx.setHasStoredConfig(true)}>
+        Stored
+      </button>
+      <button data-testid="ss_menuEnabled" onClick={() => updateFormField("menuEnabled", "true")}>
+        ME
+      </button>
+      <button data-testid="ss_menuPostre" onClick={() => updateFormField("menuPostre", "Flan")}>
+        MP
+      </button>
+      <button data-testid="ss_menuCarne" onClick={() => updateFormField("menuCarne", "Steak")}>
+        MC
+      </button>
+      <button data-testid="ss_bankInfo" onClick={() => updateFormField("bankInfo", "some-bank-info")}>
+        BI
+      </button>
+      <button data-testid="ss_bankIban" onClick={() => updateFormField("bankInfo", "ES12345678")}>
+        IB
+      </button>
+      <button data-testid="ss_hiddenSections" onClick={() => updateFormField("hiddenSections", "invalid_section")}>
+        HS
+      </button>
+      <button data-testid="ss_orderWrongLen" onClick={() => updateFormField("sectionOrder", "hero,details")}>
+        OW
+      </button>
+      <button
+        data-testid="ss_orderNoHero"
+        onClick={() => updateFormField("sectionOrder", "details,info,story,gifts,accommodation,gallery,rsvp,hero")}
+      >
+        NH
+      </button>
+      <button data-testid="ss_consent" onClick={() => updateFormField("_privacyConsent", "true")}>
+        PC
+      </button>
+      <button data-testid="ss_username" onClick={() => updateFormField("adminUsername", "admin1")}>
+        UN
+      </button>
+      <button data-testid="ss_usernameInvalid" onClick={() => updateFormField("adminUsername", "invalid user!")}>
+        UI
+      </button>
+      <button data-testid="ss_usernameLong" onClick={() => updateFormField("adminUsername", "a".repeat(51))}>
+        UL
+      </button>
+      <button data-testid="ss_musicUrl" onClick={() => updateFormField("musicUrl", "data:audio/mp3;base64,xxx")}>
+        MU
+      </button>
+      <button data-testid="ss_inviteMsg" onClick={() => updateFormField("inviteMessage", "x".repeat(2500))}>
+        IM
+      </button>
+      <button data-testid="ss_storyText" onClick={() => updateFormField("storyText", "x".repeat(2500))}>
+        ST
+      </button>
+      <button data-testid="ss_giftsInfo" onClick={() => updateFormField("giftsInfo", "x".repeat(2500))}>
+        GI
+      </button>
+      <button
+        data-testid="ss_transportDepartures"
+        onClick={() =>
+          updateFormField("transportDepartures", JSON.stringify([{ type: "bus", time: "25:00", url: "" }]))
+        }
+      >
+        TD
+      </button>
+      <span data-testid="ss_hasConfig">{String(ctx.hasStoredConfig)}</span>
+      <span data-testid="ss_inviteToken">{ctx.inviteToken}</span>
+    </div>
+  );
+}
+
+beforeEach(() => {
+  sessionStorage.clear();
+  mockSafeGetItem.mockReset();
+  mockSafeGetItem.mockImplementation(() => null);
+});
+
+describe("ConfigProvider", () => {
+  it("handleSaveSetup validates section order wrong length", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_orderWrongLen"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalled();
+    });
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup validates hidden sections", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_order"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_hiddenSections"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalledWith("errors.hiddenSectionsInvalid");
+    });
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup validates cover first", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_orderNoHero"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalledWith("errors.coverFirst");
+    });
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup validates menu required (no meat options)", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_order"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_menuEnabled"));
+    fireEvent.click(screen.getByTestId("ss_menuPostre"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalledWith("errors.menuRequired");
+    });
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup preserves hidden details section", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        firstName: "Existing",
+        secondName: "User",
+        weddingDay: "15",
+        weddingMonth: "06",
+        weddingYear: "2025",
+        weddingHour: "12",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+        _visits: 0,
+      }),
+    });
+    function PreserveConsumer() {
+      const ctx = useConfig();
+  const { updateFormField } = useFormData();
+      return (
+        <div>
+          <span data-testid="pc_hasConfig">{String(ctx.hasStoredConfig)}</span>
+          <span data-testid="pc_inviteToken">{ctx.inviteToken}</span>
+          <button data-testid="pc_first" onClick={() => updateFormField("firstName", "John")}>
+            F
+          </button>
+          <button data-testid="pc_second" onClick={() => updateFormField("secondName", "Jane")}>
+            S
+          </button>
+          <button data-testid="pc_theme" onClick={() => updateFormField("theme", "golden")}>
+            T
+          </button>
+          <button
+            data-testid="pc_order"
+            onClick={() =>
+              updateFormField("sectionOrder", "hero,details,info,story,gifts,accommodation,gallery,rsvp")
+            }
+          >
+            O
+          </button>
+          <button data-testid="pc_gp1" onClick={() => updateFormField("godparent1", "GP1")}>
+            G1
+          </button>
+          <button data-testid="pc_gp2" onClick={() => updateFormField("godparent2", "GP2")}>
+            G2
+          </button>
+          <button data-testid="pc_hidden" onClick={() => updateFormField("hiddenSections", "details")}>
+            HD
+          </button>
+          <button data-testid="pc_save" onClick={(e) => ctx.handleSaveSetup(e)}>
+            Save
+          </button>
+        </div>
+      );
+    }
+    render(
+      <ConfigProvider>
+        <PreserveConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("pc_inviteToken").textContent).toBe("abcdefghij"));
+    await waitFor(() => expect(screen.getByTestId("pc_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("pc_first"));
+    fireEvent.click(screen.getByTestId("pc_second"));
+    fireEvent.click(screen.getByTestId("pc_theme"));
+    fireEvent.click(screen.getByTestId("pc_order"));
+    fireEvent.click(screen.getByTestId("pc_gp1"));
+    fireEvent.click(screen.getByTestId("pc_gp2"));
+    fireEvent.click(screen.getByTestId("pc_hidden"));
+    fireEvent.click(screen.getByTestId("pc_save"));
+    await waitFor(() => {
+      expect(mockSetSaveMessage).toHaveBeenCalledWith("errors.configSaved");
+    });
+    expect(mockSetDoc).toHaveBeenCalled();
+    mockSetSaveMessage.mockClear();
+    mockSetDoc.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup returns early when already saving", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_order"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalledWith("errors.alreadySaving");
+    });
+    // El PRIMER guardado sigue en vuelo: su finally hace setIsSaving(false).
+    // Si el test termina sin esperar ese finally, el setState resuelve tras el
+    // teardown (window destruido) y vitest registra una unhandled rejection.
+    await waitFor(() => expect(screen.getByTestId("ss_isSaving").textContent).toBe("false"));
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup validates IBAN format", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_order"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_bankIban"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalledWith("errors.ibanInvalid");
+    });
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup validates storyText too long", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_order"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_storyText"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalledWith("errors.storyTooLong");
+    });
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup validates giftsInfo too long", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_order"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_giftsInfo"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalledWith("errors.giftsTooLong");
+    });
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+
+  it("handleSaveSetup validates invalid transport departures", async () => {
+    mockLocation.pathname = "/abcdefghij";
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        _visits: 0,
+        weddingDay: "15",
+        weddingMonth: "enero",
+        weddingYear: "2026",
+        weddingHour: "18",
+        weddingMinute: "30",
+        weddingSiteURL: "https://www.google.com/maps/place/Madrid",
+        storyText: "Historia",
+        giftsInfo: "Regalos",
+        weddingDressCode: "Formal",
+        accommodationURL: "https://www.google.com/maps/place/Hotel",
+        transportEnabled: "bus",
+      }),
+    });
+    render(
+      <ConfigProvider>
+        <SaveSetupConsumer />
+      </ConfigProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("ss_inviteToken").textContent).toBe("abcdefghij"));
+    fireEvent.click(screen.getByTestId("ss_stored"));
+    await waitFor(() => expect(screen.getByTestId("ss_hasConfig").textContent).toBe("true"));
+    fireEvent.click(screen.getByTestId("ss_first"));
+    fireEvent.click(screen.getByTestId("ss_second"));
+    fireEvent.click(screen.getByTestId("ss_theme"));
+    fireEvent.click(screen.getByTestId("ss_order"));
+    fireEvent.click(screen.getByTestId("ss_gp1"));
+    fireEvent.click(screen.getByTestId("ss_gp2"));
+    fireEvent.click(screen.getByTestId("ss_transportDepartures"));
+    fireEvent.click(screen.getByTestId("ss_save"));
+    await waitFor(() => {
+      expect(mockSetSaveError).toHaveBeenCalledWith("errors.transportTimeInvalid");
+    });
+    mockSetSaveError.mockClear();
+    mockLocation.pathname = "/test";
+  });
+});
