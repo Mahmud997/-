@@ -1,0 +1,16 @@
+User-agent: *
+# La landing es indexable; las invitaciones y rutas internas no deben
+# indexarse (sus URLs son secretas y se comparten solo con los invitados).
+Allow: /
+Disallow: /admin
+Disallow: /setup
+Disallow: /_/
+Disallow: /print
+# Las rutas con token (/{token}/admin, /{token}/setup, /{token}/print)
+# tampoco deben indexarse: el prefijo "/admin" no cubre el primer segmento
+# variable, así que se declaran con comodín (defensa en profundidad; el meta
+# noindex dinámico de cada invitación ya mitiga en la práctica).
+Disallow: /*/admin
+Disallow: /*/setup
+Disallow: /*/print
+Sitemap: https://wedingo-6c26a.web.app/sitemap.xml

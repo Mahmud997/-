@@ -1,0 +1,73 @@
+/**
+ * smoke-live.mjs — Comprobación rápida de producción tras el deploy.
+ *
+ * Uso: node scripts/smoke-live.mjs [url]
+ *    (por defecto: https://wedingo-6c26a.web.app)
+ *
+ * Verifica:
+ *   · HTTP 200 del índice y de rutas con ?lang= (rewrite SPA).
+ *   · Cabeceras de seguridad presentes y CSP sin dominios retirados
+ *     (translate.google.com — el widget se eliminó en v2.192.29).
+ *   · Assets con cache inmutable.
+ *
+ * Exit 0 = OK · 1 = algo roto.
+ */
+const BASE = process.argv[2] || "https://wedingo-6c26a.web.app";
+
+function fail(msg) {
+  console.error(`❌ ${msg}`);
+  process.exitCode = 1;
+}
+function ok(msg) {
+  console.log(`  ✅ ${msg}`);
+}
+
+// Índice + rutas ?lang (rewrite del hosting → app shell).
+for (const path of ["/?lang=pt-BR", "/?lang=ar-SA"]) {
+  try {
+    const r = await fetch(`${BASE}${path}`, { redirect: "follow" });
+    if (r.status === 200) ok(`GET ${path} → 200`);
+    else fail(`GET ${path} → ${r.status}`);
+  } catch (e) {
+    fail(`GET ${path} → ${e.message}`);
+  }
+}
+
+// Cabeceras de seguridad del índice.
+try {
+  const res = await fetch(`${BASE}/`);
+  const csp = res.headers.get("content-security-policy") || "";
+  const checks = [
+    ["CSP presente", csp.includes("default-src")],
+    ["CSP sin translate.google.com (widget eliminado)", !csp.includes("translate.google.com")],
+    ["nosniff", res.headers.get("x-content-type-options") === "nosniff"],
+    ["X-Frame-Options DENY", (res.headers.get("x-frame-options") || "").toUpperCase() === "DENY"],
+  ];
+  for (const [name, pass] of checks) (pass ? ok : fail)(name);
+} catch (e) {
+  fail(`cabeceras: ${e.message}`);
+}
+
+// Assets con cache inmutable: se extrae un asset REAL del index.html servido
+// (no del dist local, que puede divergir del deploy).
+try {
+  const indexRes = await fetch(`${BASE}/`);
+  const html = await indexRes.text();
+  const asset = (html.match(/\/assets\/[^"]+\.js/) || [null])[0];
+  if (asset) {
+    const r = await fetch(`${BASE}${asset}`, { method: "GET" });
+    const cc = r.headers.get("cache-control") || "";
+    if (cc.includes("immutable")) ok(`asset ${asset} → immutable OK`);
+    else fail(`asset ${asset} → cache-control: ${cc}`);
+  } else {
+    fail("no se encontró ningún asset en el index servido");
+  }
+} catch (e) {
+  fail(`asset: ${e.message}`);
+}
+
+if (process.exitCode) {
+  console.error("\n🚨 SMOKE FALLÓ — revisa el deploy.");
+  process.exit(1);
+}
+console.log("\n✅ Smoke OK — producción responde y con las cabeceras correctas.");
